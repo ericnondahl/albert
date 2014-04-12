@@ -1,7 +1,5 @@
 package com.edn.albert;
 
-import java.util.Random;
-
 import lejos.hardware.Button;
 import lejos.hardware.lcd.LCD;
 import lejos.hardware.motor.Motor;
@@ -14,17 +12,29 @@ import lejos.robotics.filter.MeanFilter;
 import lejos.robotics.subsumption.Arbitrator;
 import lejos.robotics.subsumption.Behavior;
 
-
 public class Albert {
 	
-	public static final int LED_PATTERN_DEFAULT = 0;
-	public static final int LED_PATTERN_HAPPY = 1;
-	public static final int LED_PATTERN_PROBLEM = 2;
-	public static final int LED_PATTERN_INPUT = 6;
-
+	public static final long MAX_PROGRAM_TIME = 60000;
+	
 	public static void main(String[] args) {
 		AlbertController controller = new AlbertController();
 		controller.start();
+	}
+}
+
+enum Emotion {
+	DEFAULT(0),
+	HAPPY(1),
+	PROBLEM(2),
+	INPUT(6);
+	
+	private int LEDValue;
+	private Emotion(int LEDValue) {
+		this.LEDValue = LEDValue;
+	}
+	
+	public int getLEDValue() {
+		return LEDValue;
 	}
 }
 
@@ -48,32 +58,40 @@ class AlbertController {
 		sensorThread.setDaemon(true);
 		sensorThread.start();
 		
+		ProgramControl control = new ProgramControl();
+		
 		Behavior[] behaviorList = {
 			new DriveForward(this, leftMotor, rightMotor),
 			new AvoidWall(this, sensorThread, leftMotor, rightMotor),
-			new ProgramControl()
+			control
 		};
 		
 		Arbitrator arbitrator = new Arbitrator(behaviorList);
 		
-		LCD.drawString("Albert 0.1",0,1);
+		LCD.drawString("Albert",0,1);
 		LCD.drawString("Push to Start",0,2);
-		Button.LEDPattern(Albert.LED_PATTERN_INPUT);
+		showEmotion(Emotion.INPUT);
 		Button.waitForAnyPress();
 		
+		control.startTimer();
 		endAction();
 		arbitrator.start();
 	}
 	
+	public void showEmotion(Emotion emotion) {
+		Button.LEDPattern(emotion.getLEDValue());
+		LCD.clear();
+		LCD.drawString(emotion.name(),0,1);
+		//TODO sound
+	}
+	
 	public void endAction() {
+		leftMotor.stop(true); 
+		rightMotor.stop(true);
 		leftMotor.setSpeed(DEFAULT_MOTOR_SPEED);
 		rightMotor.setSpeed(DEFAULT_MOTOR_SPEED);
 		leftMotor.setAcceleration(DEFAULT_MOTOR_ACCELERATION);
 		rightMotor.setAcceleration(DEFAULT_MOTOR_ACCELERATION);
-		leftMotor.stop(true); 
-		rightMotor.stop(true);
-		Button.LEDPattern(Albert.LED_PATTERN_DEFAULT);
-		LCD.clear();
 	}
 	
 }
@@ -133,7 +151,7 @@ class DriveForward implements Behavior {
 	}
 
 	public boolean takeControl() {
-		return true;  //always wants control
+		return true;
 	}
 
 	public void suppress() {
@@ -143,8 +161,7 @@ class DriveForward implements Behavior {
 	public void action() {
 		suppressed = false;
 		
-		Button.LEDPattern(Albert.LED_PATTERN_HAPPY);
-		LCD.drawString("DriveForward",0,1);
+		controller.showEmotion(Emotion.HAPPY);
 		
 		leftMotor.forward();
 		rightMotor.forward();
@@ -194,22 +211,37 @@ class AvoidWall implements Behavior {
 
 	public void action() {
 		
-		//TODO make async and check supressed
-		
-		LCD.drawString("AvoidWall",0,1);
-		Button.LEDPattern(Albert.LED_PATTERN_PROBLEM);
+		controller.showEmotion(Emotion.PROBLEM);
 		
 		if(sensorThread.isTouched()) {
 			leftMotor.setSpeed(100);
 			rightMotor.setSpeed(100);
-			leftMotor.rotate(-360);
-			rightMotor.rotate(-360);
+			leftMotor.rotate(-360, true);
+			rightMotor.rotate(-360, true);
+		}
+		
+		while(rightMotor.isMoving() || leftMotor.isMoving()) {
+			if(supressed) {
+				controller.endAction();
+				return;
+			}
+			
+			Thread.yield();
 		}
 		
 		leftMotor.setSpeed(100);
 		rightMotor.setSpeed(100);
 		leftMotor.rotate(360, true);
-		rightMotor.rotate(-360);
+		rightMotor.rotate(-360, true);
+		
+		while(rightMotor.isMoving() || leftMotor.isMoving()) {
+			if(supressed) {
+				controller.endAction();
+				return;
+			}
+			
+			Thread.yield();
+		}
 		
 		controller.endAction();
 	}
@@ -218,18 +250,26 @@ class AvoidWall implements Behavior {
 
 class ProgramControl implements Behavior {
 	
-	//TODO add total program time
+	long startTime = -1;
 	
 	@Override
 	public boolean takeControl() {
 		
-		if (Button.readButtons() == Button.ID_ESCAPE) {      
+		if (Button.readButtons() > 0) {      
+			return true;
+		}
+		
+		if(startTime != -1 && System.currentTimeMillis() - startTime > Albert.MAX_PROGRAM_TIME) {
 			return true;
 		}
 		
 		return false;
 	}
 
+	public void startTimer() {
+		startTime = System.currentTimeMillis();
+	}
+	
 	@Override
 	public void action() {
 		System.exit(1);
