@@ -1,10 +1,13 @@
 package com.edn.albert;
 
+import java.util.Random;
+
 import lejos.hardware.Button;
 import lejos.hardware.lcd.LCD;
 import lejos.hardware.motor.Motor;
 import lejos.hardware.port.SensorPort;
 import lejos.hardware.sensor.EV3IRSensor;
+import lejos.hardware.sensor.EV3TouchSensor;
 import lejos.robotics.RegulatedMotor;
 import lejos.robotics.SampleProvider;
 import lejos.robotics.filter.MeanFilter;
@@ -32,7 +35,7 @@ class AlbertController {
 	
 	private RegulatedMotor leftMotor = Motor.B;
 	private RegulatedMotor rightMotor = Motor.C;
-	private IRSensorThread sensorThread;
+	private SensorThread sensorThread;
 	
 	public void start() {
 		
@@ -40,19 +43,15 @@ class AlbertController {
 		rightMotor.resetTachoCount();
 		leftMotor.rotateTo(0);
 		rightMotor.rotateTo(0);
-		leftMotor.setSpeed(DEFAULT_MOTOR_SPEED);
-		rightMotor.setSpeed(DEFAULT_MOTOR_SPEED);
-		leftMotor.setAcceleration(DEFAULT_MOTOR_ACCELERATION);
-		rightMotor.setAcceleration(DEFAULT_MOTOR_ACCELERATION);
 		
-		sensorThread = new IRSensorThread();
+		sensorThread = new SensorThread();
 		sensorThread.setDaemon(true);
 		sensorThread.start();
 		
 		Behavior[] behaviorList = {
 			new DriveForward(this, leftMotor, rightMotor),
-			new AvoidWall(this, sensorThread),
-			new ProgramControl(this)
+			new AvoidWall(this, sensorThread, leftMotor, rightMotor),
+			new ProgramControl()
 		};
 		
 		Arbitrator arbitrator = new Arbitrator(behaviorList);
@@ -67,37 +66,55 @@ class AlbertController {
 	}
 	
 	public void endAction() {
+		leftMotor.setSpeed(DEFAULT_MOTOR_SPEED);
+		rightMotor.setSpeed(DEFAULT_MOTOR_SPEED);
+		leftMotor.setAcceleration(DEFAULT_MOTOR_ACCELERATION);
+		rightMotor.setAcceleration(DEFAULT_MOTOR_ACCELERATION);
 		leftMotor.stop(true); 
 		rightMotor.stop(true);
 		Button.LEDPattern(Albert.LED_PATTERN_DEFAULT);
 		LCD.clear();
 	}
 	
-	public void exit() {
-		endAction();
-		System.exit(1);
-	}
 }
 
-class IRSensorThread extends Thread {
+class SensorThread extends Thread {
+	
+	private EV3TouchSensor touch = new EV3TouchSensor(SensorPort.S4);
+	private boolean touchActivated = false;
 	
 	private EV3IRSensor ir = new EV3IRSensor(SensorPort.S2);
-	private int distance = 255;
-	private SampleProvider average = new MeanFilter(ir, 5);
+	private int infaredDistance = 255;
+	private SampleProvider infaredAverage = new MeanFilter(ir, 5);
 	
 	public void run() {
 		
 		while (true) {
 			float [] sample = new float[ir.sampleSize()];
-			average.fetchSample(sample, 0);
-			distance = (int)sample[0];
-			System.out.println("Control: Distance: " + distance);
+			infaredAverage.fetchSample(sample, 0);
+			infaredDistance = (int)sample[0];
+			
+			sample = new float[touch.sampleSize()];
+			touch.fetchSample(sample, 0);
+			
+			touchActivated = sample[0] > 0;
+			System.out.println("Control: Distance: " + infaredDistance+" touch "+touchActivated);
+			
+			try {
+				Thread.sleep(150);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
 		}
 		
 	}
 	
-	public int getDistance() {
-		return distance;
+	public int getIRDistance() {
+		return infaredDistance;
+	}
+	
+	public boolean isTouched() {
+		return touchActivated;
 	}
 	
 }
@@ -116,11 +133,11 @@ class DriveForward implements Behavior {
 	}
 
 	public boolean takeControl() {
-		return true;  // DriveForward always wants control
+		return true;  //always wants control
 	}
 
 	public void suppress() {
-		suppressed = true; // DriveForward supressed
+		suppressed = true;
 	}
 
 	public void action() {
@@ -129,8 +146,6 @@ class DriveForward implements Behavior {
 		Button.LEDPattern(Albert.LED_PATTERN_HAPPY);
 		LCD.drawString("DriveForward",0,1);
 		
-		leftMotor.setSpeed(400);
-		rightMotor.setSpeed(400);
 		leftMotor.forward();
 		rightMotor.forward();
 		
@@ -146,17 +161,22 @@ class DriveForward implements Behavior {
 class AvoidWall implements Behavior {
 
 	private boolean supressed;
-	private IRSensorThread sensorThread;
+	private SensorThread sensorThread;
 	private AlbertController controller;
+	private RegulatedMotor leftMotor, rightMotor;
 	
-	public AvoidWall(AlbertController controller, IRSensorThread sensorThread) {
+	private static final int WALL_DISTANCE = 40;
+	
+	public AvoidWall(AlbertController controller, SensorThread sensorThread, RegulatedMotor leftMotor, RegulatedMotor rightMotor) {
 		this.controller = controller;
 		this.sensorThread = sensorThread;
+		this.leftMotor = leftMotor;
+		this.rightMotor = rightMotor;
 	}
 	
 	private boolean isWallDetected() {
 
-		if (sensorThread.getDistance() < 30) {
+		if (sensorThread.getIRDistance() < WALL_DISTANCE || sensorThread.isTouched()) {
 			return true;
 		}
 		else {
@@ -174,45 +194,36 @@ class AvoidWall implements Behavior {
 
 	public void action() {
 		
+		//TODO make async and check supressed
+		
 		LCD.drawString("AvoidWall",0,1);
 		Button.LEDPattern(Albert.LED_PATTERN_PROBLEM);
 		
-		while(isWallDetected() && !supressed) {
-			Thread.yield();
+		if(sensorThread.isTouched()) {
+			leftMotor.setSpeed(100);
+			rightMotor.setSpeed(100);
+			leftMotor.rotate(-360);
+			rightMotor.rotate(-360);
 		}
 		
-		controller.endAction();
+		leftMotor.setSpeed(100);
+		rightMotor.setSpeed(100);
+		leftMotor.rotate(360, true);
+		rightMotor.rotate(-360);
 		
-		//      EV3BumperCar.leftMotor.rotate(-180, true);// start Motor.A rotating backward
-		//      EV3BumperCar.rightMotor.rotate(-180);  // rotate C farther to make the turn
-		//    if ((System.currentTimeMillis() & 0x1) != 0)
-		//    {
-		//        EV3BumperCar.leftMotor.rotate(-180, true);// start Motor.A rotating backward
-		//        EV3BumperCar.rightMotor.rotate(180);  // rotate C farther to make the turn
-		//    }
-		//    else
-		//    {
-		//        EV3BumperCar.rightMotor.rotate(-180, true);// start Motor.A rotating backward
-		//        EV3BumperCar.leftMotor.rotate(180);  // rotate C farther to make the turn        
-		//    }
-
-
+		controller.endAction();
 	}
 
 }
 
 class ProgramControl implements Behavior {
-
-	private AlbertController controller;
 	
-	public ProgramControl(AlbertController controller) {
-		this.controller = controller;
-	}
+	//TODO add total program time
 	
 	@Override
 	public boolean takeControl() {
 		
-		if (Button.readButtons() != 0) {      
+		if (Button.readButtons() == Button.ID_ESCAPE) {      
 			return true;
 		}
 		
@@ -221,22 +232,7 @@ class ProgramControl implements Behavior {
 
 	@Override
 	public void action() {
-		
-		LCD.drawString("Program Control",0,1);
-		LCD.drawString("Enter: Continue",0,2);
-		LCD.drawString("Back: Quit",0,3);
-		Button.LEDPattern(Albert.LED_PATTERN_INPUT);
-		
-		Button.discardEvents();
-		System.out.println("Button pressed");
-		if ((Button.waitForAnyPress() & Button.ID_ESCAPE) != 0) {
-			controller.exit();
-		}
-		System.out.println("Button pressed 2");
-		Button.waitForAnyEvent();
-		System.out.println("Button released");
-		
-		controller.endAction();
+		System.exit(1);
 	}
 
 	@Override
